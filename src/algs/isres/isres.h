@@ -31,6 +31,8 @@ extern "C"
 {
 #endif /* __cplusplus */
 
+extern const char* isres_output_folder;
+
 nlopt_result isres_minimize(int n, nlopt_func f, void *f_data,
 			    int m, nlopt_constraint *fc, /* fc <= 0  */
 			    int p, nlopt_constraint *h, /* h == 0 */

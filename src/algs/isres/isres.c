@@ -23,8 +23,10 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "isres.h"
+#include "globals.h"
 
 /* Improved Stochastic Ranking Evolution Strategy (ISRES) algorithm
    for nonlinearly-constrained global optimization, based on
@@ -45,6 +47,20 @@
    available from his web page: http://www3.hi.is/~tpr
 */
 
+#define MAX_SURVIVORS 100  // maximum survivors to store
+#define MAX_TOTAL_SURVIVORS 6000000 
+#define TOLERANCE 0.1     // tolerance relative to final_minf
+#define ABS_TOLERANCE 1e-2
+
+// Survivor archive entry
+typedef struct {
+    double *x;
+    double fval;
+} survivor_t;
+
+survivor_t* survivor_pool=NULL;
+int survivor_count = 0;
+
 static int key_compare(void *keys_, const void *a_, const void *b_)
 {
      const double *keys = (const double *) keys_;
@@ -54,6 +70,114 @@ static int key_compare(void *keys_, const void *a_, const void *b_)
 }
 
 static unsigned imax2(unsigned a, unsigned b) { return (a > b ? a : b); }
+
+// Call this once before optimization to allocate survivor pool
+void initialize_survivor_pool(int population, int n) {
+//    int max_survivors = population * 100; // estimate max 100 generations
+    survivor_pool = (survivor_t*) malloc(sizeof(survivor_t) * MAX_TOTAL_SURVIVORS);
+    if (!survivor_pool) {
+        fprintf(stderr, "Failed to allocate survivor_pool\n");
+        exit(1);
+    }
+//    printf("Allocated space for %d survivors (pop=%d, n=%d)\n", max_survivors, population, n);
+}
+
+void insert_survivor(double *x, double fval, int n) {
+    if (!survivor_pool || survivor_count >= MAX_TOTAL_SURVIVORS) {
+        fprintf(stderr, "Survivor pool full or not initialized!\n");
+        return;
+    }
+    double* xcopy = (double*) malloc(sizeof(double) * n);
+    if (!xcopy) return;  // fail silently on malloc fail
+    memcpy(xcopy, x, sizeof(double) * n);
+
+    survivor_pool[survivor_count].x = xcopy;
+    survivor_pool[survivor_count].fval = fval;
+    survivor_count++;
+}
+
+// After optimization finished: filter survivors by final_minf and keep top MAX_SURVIVORS
+void filter_survivors_by_final_minf(double final_minf, int n) {
+    // Sort survivor_pool ascending by fval (simple insertion sort)
+    for (int i = 1; i < survivor_count; i++) {
+        survivor_t key = survivor_pool[i];
+        int j = i - 1;
+        while (j >= 0 && survivor_pool[j].fval > key.fval) {
+            survivor_pool[j + 1] = survivor_pool[j];
+            j--;
+        }
+        survivor_pool[j + 1] = key;
+    }
+
+    survivor_t filtered[MAX_SURVIVORS];
+    int filtered_count = 0;
+
+    // Step 2: Retain survivors within tolerance
+    int* used = (int*) calloc(survivor_count, sizeof(int));
+
+    for (int i = 0; i < survivor_count && filtered_count < MAX_SURVIVORS; i++) {
+        double diff = fabs(survivor_pool[i].fval - final_minf);
+        if (diff <= fabs(final_minf) * TOLERANCE || (fabs(final_minf) < 1e-14 && diff <= TOLERANCE)) {
+            filtered[filtered_count++] = survivor_pool[i];
+            used[i] = 1;
+        }
+    }
+
+    // Step 3: If too few survivors, top up from best ones (already sorted)
+    for (int i = 0; i < survivor_count && filtered_count < MAX_SURVIVORS; i++) {
+        if (!used[i]) {
+            filtered[filtered_count++] = survivor_pool[i];
+            used[i] = 1;
+        }
+    }
+
+   // Free all unused x pointers
+    for (int i = 0; i < survivor_count; i++) {
+        if (!used[i]) {
+            free(survivor_pool[i].x);
+        }
+    }
+
+    // Step 4: Copy back to survivor_pool
+    for (int i = 0; i < filtered_count; i++) {
+        survivor_pool[i] = filtered[i];
+    }
+    survivor_count = filtered_count;
+
+//    printf("Filtered to %d survivors. Final minf = %.10g\n", survivor_count, final_minf);
+    free(used); // clean up
+}
+
+void write_survivor_archive(const char* output_folder, int n) {
+    char path[1024];
+    if (seq_num >= 0)
+        snprintf(path, sizeof(path), "%s/survivor_archive_%d.csv", output_folder, seq_num);
+    else
+        snprintf(path, sizeof(path), "%s/survivor_archive.csv", output_folder);
+
+    FILE* fp = fopen(path, "w");
+    if (!fp) return;
+
+    // Header
+    for (int j = 0; j < n; ++j)
+        fprintf(fp, "x%d,", j);
+    fprintf(fp, "fval\n");
+
+    for (int i = 0; i < survivor_count; ++i) {
+        for (int j = 0; j < n; ++j)
+            fprintf(fp, "%.10g,", survivor_pool[i].x[j]);
+        fprintf(fp, "%.10g\n", survivor_pool[i].fval);
+    }
+
+    fclose(fp);
+}
+
+void free_survivor_pool() {
+    for (int i = 0; i < survivor_count; ++i) {
+        free(survivor_pool[i].x);
+    }
+    survivor_count = 0;
+}
 
 nlopt_result isres_minimize(int n, nlopt_func f, void *f_data,
 			    int m, nlopt_constraint *fc, /* fc <= 0 */
@@ -82,6 +206,10 @@ nlopt_result isres_minimize(int n, nlopt_func f, void *f_data,
      double taup, tau;
      double *results = 0; /* scratch space for mconstraint results */
      unsigned ires;
+        
+     const char* isres_output_folder = "./";  // default to current folder
+     initialize_survivor_pool(population, n); 
+
 
      *minf = HUGE_VAL;
 
@@ -197,7 +325,8 @@ nlopt_result isres_minimize(int n, nlopt_func f, void *f_data,
 	       else if (nlopt_stop_time(stop)) ret = NLOPT_MAXTIME_REACHED;
 	       if (ret != NLOPT_SUCCESS) goto done;
 	  }
-
+           
+        
 	  /* "selection" step: rank the population */
 	  for (k = 0; k < population; ++k) irank[k] = k;
 	  if (all_feasible) /* special case: rank by objective function */
@@ -227,6 +356,14 @@ nlopt_result isres_minimize(int n, nlopt_func f, void *f_data,
 		    if (!swapped) break;
 	       }
 	  }
+
+          //collect survivors
+          for (k = 0; k < survivors; ++k) {
+              int idx = irank[k];
+              if (penalty[idx] <= 1e-12) {
+                  insert_survivor(xs + idx * n, fval[idx], n);
+              }
+          }
 
 	  /* evolve the population:
 	     differential evolution for the best survivors,
@@ -281,6 +418,11 @@ nlopt_result isres_minimize(int n, nlopt_func f, void *f_data,
      }
 
 done:
+     {
+       filter_survivors_by_final_minf(*minf, n);
+       write_survivor_archive(isres_output_folder, n);
+       free_survivor_pool();
+     }
      if (irank) free(irank);
      if (sigmas) free(sigmas);
      if (results) free(results);
