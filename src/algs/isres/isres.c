@@ -148,7 +148,7 @@ void filter_survivors_by_final_minf(double final_minf, int n) {
     free(used); // clean up
 }
 
-void write_survivor_archive(const char* output_folder, int n) {
+void write_survivor_archive(const char* output_folder, int n,const double* x_final, double minf) {
     char path[1024];
     if (seq_num >= 0)
         snprintf(path, sizeof(path), "%s/survivor_archive_%d.csv", output_folder, seq_num);
@@ -163,6 +163,12 @@ void write_survivor_archive(const char* output_folder, int n) {
         fprintf(fp, "x%d,", j);
     fprintf(fp, "fval\n");
 
+    // Final best point (from x_final, minf)
+    for (int j = 0; j < n; ++j)
+        fprintf(fp, "%.10g,", x_final[j]);
+    fprintf(fp, "%.10g\n", minf);
+
+    // Archived survivors
     for (int i = 0; i < survivor_count; ++i) {
         for (int j = 0; j < n; ++j)
             fprintf(fp, "%.10g,", survivor_pool[i].x[j]);
@@ -360,7 +366,7 @@ nlopt_result isres_minimize(int n, nlopt_func f, void *f_data,
           //collect survivors
           for (k = 0; k < survivors; ++k) {
               int idx = irank[k];
-              if (penalty[idx] <= 1e-12) {
+              if (penalty[idx] <= 1e-8) {
                   insert_survivor(xs + idx * n, fval[idx], n);
               }
           }
@@ -420,7 +426,7 @@ nlopt_result isres_minimize(int n, nlopt_func f, void *f_data,
 done:
      {
        filter_survivors_by_final_minf(*minf, n);
-       write_survivor_archive(isres_output_folder, n);
+       write_survivor_archive(isres_output_folder, n, x, *minf);
        free_survivor_pool();
      }
      if (irank) free(irank);
